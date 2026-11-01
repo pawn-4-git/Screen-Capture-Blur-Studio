@@ -1,0 +1,1 @@
+# Screen-Capture-Blur-Studio
