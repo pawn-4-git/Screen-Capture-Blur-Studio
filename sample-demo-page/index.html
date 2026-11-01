@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>【SAMPLE / 見本】顧客プロフィール管理画面（キャプチャ＆ぼかしデモ用）</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="demo-ribbon">
+    <div class="demo-ribbon-title">
+      <span class="sample-pill">SAMPLE / DEMO</span>
+      <span>Screen Capture &amp; Blur Studio デモ撮影用サンプルページ</span>
+    </div>
+    <p class="demo-ribbon-note">
+      ※このページに記載されている氏名・住所・連絡先・画像はすべてデモンストレーション用の架空（見本）データです。
+    </p>
+  </header>
+
+  <main class="container">
+    <!-- 1. 会員プロフィール見本カード -->
+    <section class="card">
+      <div class="card-header">
+        <h1 class="card-title">会員プロフィール詳細（架空サンプルデータ）</h1>
+        <span class="tag-sample">SAMPLE DATA / 見本情報</span>
+      </div>
+
+      <div class="profile-layout">
+        <figure class="profile-photo-box">
+          <img
+            src="images/sample-profile-face.png"
+            alt="サンプル顔写真・見本プロフィール人物写真"
+            title="見本 太郎のサンプルプロフィール顔写真"
+            class="profile-photo"
+          />
+          <figcaption class="photo-caption">
+            【見本顔写真】SAMPLE PORTRAIT
+          </figcaption>
+        </figure>
+
+        <table class="info-table">
+          <tbody>
+            <tr>
+              <th>氏名（サンプル名）</th>
+              <td>見本 太郎（ミホン タロウ）</td>
+            </tr>
+            <tr>
+              <th>メールアドレス</th>
+              <td class="mono">taro.mihon.sample@example.com</td>
+            </tr>
+            <tr>
+              <th>電話番号（携帯 / 自宅）</th>
+              <td class="mono">090-1234-5678 / 03-9876-5432</td>
+            </tr>
+            <tr>
+              <th>現住所（見本住所）</th>
+              <td>〒100-0001 東京都千代田区千代田1-1-1 サンプルタワー802号</td>
+            </tr>
+            <tr>
+              <th>決済カード番号（見本）</th>
+              <td class="mono">4980-1234-5678-9012</td>
+            </tr>
+            <tr>
+              <th>APIシークレットキー（見本）</th>
+              <td class="mono">sk-sampleDemoSecretKey9876543210abcdef</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 2. 文章中の個人名（敬称付き氏名・連絡先）テスト用セクション -->
+    <div class="grid-2">
+      <section class="card">
+        <div class="card-header">
+          <h2 class="card-title">対応履歴メモ（文章中の個人名テスト）</h2>
+          <span class="tag-sample">SAMPLE TEXT</span>
+        </div>
+        <div class="message-list">
+          <article class="message-item">
+            <p class="message-meta">2026/11/01 10:00 — 打ち合わせ記録（見本）</p>
+            <p>
+              本日は株式会社サンプルの山田 花子さんと、新機能のデモ動画撮影についてオンライン会議を実施しました。
+            </p>
+          </article>
+          <article class="message-item">
+            <p class="message-meta">2026/11/01 11:30 — 資料送付メモ（見本）</p>
+            <p>
+              確認用のサンプル資料一式は、担当の佐藤 健太様（kenta.sato.sample@example.jp / 080-9999-0000）宛てに送付済みです。
+            </p>
+          </article>
+          <article class="message-item">
+            <p class="message-meta">2026/11/01 12:15 — 承認コメント（見本）</p>
+            <p>
+              承認責任者：鈴木 一郎氏より公開前の個人情報マスク処理（伏せ字・ぼかし）の完了確認を受けました。
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <!-- 3. 画像のAIぼかし判定テスト（身分証画像 vs 一般風景バナー） -->
+      <section class="card">
+        <div class="card-header">
+          <h2 class="card-title">添付画像比較（要ぼかし画像 vs 一般画像）</h2>
+          <span class="tag-sample">SAMPLE IMAGES</span>
+        </div>
+        <div class="gallery-grid">
+          <figure class="gallery-card">
+            <img
+              src="images/sample-id-card.png"
+              alt="サンプル身分証明書・見本社員証カード写真"
+              title="個人情報を含む見本身分証画像"
+            />
+            <figcaption class="gallery-title">【見本身分証】SAMPLE ID CARD</figcaption>
+            <p class="gallery-sub">AI判定で自動的にぼかし（CSS blur）が入ります</p>
+          </figure>
+
+          <figure class="gallery-card">
+            <img
+              src="images/sample-public-banner.png"
+              alt="一般公開用の自然風景イラストバナー"
+              title="公開可能な装飾バナー画像"
+            />
+            <figcaption class="gallery-title">【一般装飾画像】PUBLIC BANNER</figcaption>
+            <p class="gallery-sub">個人情報を含まないためそのまま表示されます</p>
+          </figure>
+        </div>
+      </section>
+    </div>
+
+    <!-- 4. フォーム入力欄の伏せ字テスト -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">入力フォーム（フォーム値の伏せ字テスト）</h2>
+        <span class="tag-sample">SAMPLE FORM</span>
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="sample-input-name">申請者氏名（見本）</label>
+          <input id="sample-input-name" type="text" name="applicant_name" value="高橋 サンプル次郎さん" />
+        </div>
+        <div class="form-group">
+          <label for="sample-input-email">連絡先メールアドレス（見本）</label>
+          <input id="sample-input-email" type="email" name="applicant_email" value="jiro.takahashi.sample@example.org" />
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
+
