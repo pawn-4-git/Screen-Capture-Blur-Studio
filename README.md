@@ -5,7 +5,7 @@
 ## フォルダ構成
 
 ```text
-chromeextention/screen-capture-editor/
+screen-capture-editor/       # Chrome 拡張機能本体
 ├── manifest.json            # Manifest V3 定義ファイル
 ├── service-worker.js        # バックグラウンド処理（画面キャプチャ・右クリックメニュー・履歴保存）
 ├── content/
@@ -19,6 +19,12 @@ chromeextention/screen-capture-editor/
     ├── icon-16.png
     ├── icon-48.png
     └── icon-128.png
+
+screen-capture-editor.zip     # 配布用パッケージ（screen-capture-editor/ と同階層）
+sample-demo-page/             # 動作確認用のサンプルページ
+├── index.html
+├── style.css
+└── images/
 ```
 
 ## インストール方法（開発者モード）
@@ -26,7 +32,7 @@ chromeextention/screen-capture-editor/
 1. Chrome で `chrome://extensions/` を開きます。
 2. 右上の **「デベロッパー モード」** を ON にします。
 3. 左上の **「パッケージ化されていない拡張機能を読み込む」** をクリックします。
-4. `chromeextention/screen-capture-editor` フォルダを選択します。
+4. `screen-capture-editor` フォルダを選択します。
 
 ## 主な機能・使い方
 
