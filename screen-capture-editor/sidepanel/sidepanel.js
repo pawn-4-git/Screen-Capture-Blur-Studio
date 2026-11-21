@@ -1,13 +1,26 @@
 // sidepanel/sidepanel.js - Side Panel Image Capture & Blur/Filter Editor
 
+const MAX_CHAR_ICONS = 5;
+const DEFAULT_CHAR_ICON_SIZE = 80;
+const iconImageCache = new Map(); // iconId or dataUrl -> HTMLImageElement
+let iconSizePreviewTimer = null;
+
 const state = {
   sourceImage: null, // HTMLImageElement of the active (already cropped if area-selected) image
   activeCaptureId: null,
   drawMode: 'brush', // 'brush' (丸ペン) | 'circle' (丸の範囲) | 'rect' (四角の範囲)
   brushSize: 36, // Diameter in image pixels (scaled comfortably)
-  spotTool: 'blur', // 'blur' | 'pixelate' | 'mask' | 'box'
+  spotTool: 'blur', // 'blur' | 'pixelate' | 'mask' | 'box' | 'icon'
   spotStrength: 16,
   spotColor: '#0f172a',
+  characterIcons: [], // Up to 5 saved icons: [{ id, name, dataUrl, size }]
+  selectedIconId: null,
+  replaceTargetIconId: null,
+  previewingIconId: null, // Temporarily show icon size preview on canvas when adjusting slider
+  selectedStampId: null, // ID of the currently selected placed icon region on the canvas
+  iconDragAction: null, // 'create-new' | 'move-existing' | 'resize-existing' | null
+  activeManipulatedRegion: null,
+  dragOffset: { x: 0, y: 0 },
   regions: [], // Array of region objects in sourceImage coordinates
   isDragging: false,
   dragStart: null,
@@ -38,8 +51,18 @@ const els = {
   btnUndoRegion: document.getElementById('btn-undo-region'),
   btnClearRegions: document.getElementById('btn-clear-regions'),
   btnClearPreview: document.getElementById('btn-clear-preview'),
+  drawModeBar: document.getElementById('draw-mode-bar'),
   modeChips: document.querySelectorAll('.mode-chip'),
   toolChips: document.querySelectorAll('.tool-chip'),
+  charIconPanel: document.getElementById('char-icon-panel'),
+  charIconCount: document.getElementById('char-icon-count'),
+  charIconUpload: document.getElementById('char-icon-upload'),
+  charIconReplace: document.getElementById('char-icon-replace'),
+  charIconList: document.getElementById('char-icon-list'),
+  placedIconSection: document.getElementById('placed-icon-section'),
+  placedIconCount: document.getElementById('placed-icon-count'),
+  placedIconList: document.getElementById('placed-icon-list'),
+  spotControlsStack: document.getElementById('spot-controls-stack'),
   brushSizeRow: document.getElementById('brush-size-row'),
   brushSize: document.getElementById('brush-size'),
   brushSizeVal: document.getElementById('brush-size-val'),
@@ -109,6 +132,42 @@ function getScaledBrushDiameter() {
   if (!state.sourceImage) return state.brushSize;
   const scaleFactor = Math.max(1, state.sourceImage.naturalWidth / 600);
   return Math.round(state.brushSize * scaleFactor);
+}
+
+// Compute effective character icon size in sourceImage pixels based on a base UI size (16..420 px)
+function getScaledIconSize(baseSize = DEFAULT_CHAR_ICON_SIZE) {
+  const numericSize = Math.max(16, Math.min(420, Number(baseSize) || DEFAULT_CHAR_ICON_SIZE));
+  if (!state.sourceImage) return numericSize;
+  const scaleFactor = Math.max(1, state.sourceImage.naturalWidth / 600);
+  return Math.round(numericSize * scaleFactor);
+}
+
+function getBaseIconSizeFromScaled(scaledSize) {
+  const scaleFactor = state.sourceImage
+    ? Math.max(1, state.sourceImage.naturalWidth / 600)
+    : 1;
+  return Math.max(16, Math.min(420, Math.round(scaledSize / scaleFactor)));
+}
+
+function getActiveCharacterIcon() {
+  if (!state.characterIcons.length) return null;
+  return (
+    state.characterIcons.find((item) => item.id === state.selectedIconId) ||
+    state.characterIcons[0]
+  );
+}
+
+async function cacheCharacterIconImage(icon) {
+  if (!icon || !icon.dataUrl) return null;
+  try {
+    const img = await loadImageElement(icon.dataUrl);
+    iconImageCache.set(icon.id, img);
+    iconImageCache.set(icon.dataUrl, img);
+    return img;
+  } catch (err) {
+    console.warn('Failed to cache character icon image:', err);
+    return null;
+  }
 }
 
 // Update the small circular dot preview next to the brush size slider
@@ -286,8 +345,104 @@ function applyBrushRegion(workCtx, workCanvas, region) {
   workCtx.drawImage(maskCanvas, bx, by);
 }
 
-// Apply a spot effect (brush / circle / rect) onto workCanvas in image coordinates
-function applySpotRegion(workCtx, workCanvas, region) {
+// Compute bounding box of a placed or preview character icon region using its own independent size (always full image preserving aspect ratio)
+function getIconRegionBounds(workCanvas, region) {
+  const iconObj = state.characterIcons.find((item) => item.id === region.iconId);
+  const img =
+    iconImageCache.get(region.iconId) ||
+    iconImageCache.get(region.iconDataUrl) ||
+    (iconObj ? iconImageCache.get(iconObj.dataUrl) : null);
+  if (!img) return null;
+
+  const natW = Math.max(1, img.naturalWidth || img.width || 100);
+  const natH = Math.max(1, img.naturalHeight || img.height || 100);
+  const ownScaledSize =
+    region.size ||
+    (region.baseSize ? getScaledIconSize(region.baseSize) : getScaledIconSize(DEFAULT_CHAR_ICON_SIZE));
+
+  const cx = region.cx ?? region.x ?? workCanvas.width / 2;
+  const cy = region.cy ?? region.y ?? workCanvas.height / 2;
+  const targetSize = Math.max(12, ownScaledSize);
+
+  let dw = 0;
+  let dh = 0;
+  if (natW >= natH) {
+    dw = targetSize;
+    dh = Math.max(8, Math.round(targetSize * (natH / natW)));
+  } else {
+    dh = targetSize;
+    dw = Math.max(8, Math.round(targetSize * (natW / natH)));
+  }
+  const dx = Math.round(cx - dw / 2);
+  const dy = Math.round(cy - dh / 2);
+
+  return {
+    img,
+    dx,
+    dy,
+    dw,
+    dh,
+    cx: dx + dw / 2,
+    cy: dy + dh / 2
+  };
+}
+
+// Draw a character icon region onto workCtx using its own independent size (always full character image)
+function applyIconRegion(
+  workCtx,
+  workCanvas,
+  region,
+  alpha = 1,
+  drawGuide = false,
+  isSelectedStamp = false
+) {
+  const bounds = getIconRegionBounds(workCanvas, region);
+  if (!bounds) return;
+
+  const { img, dx, dy, dw, dh } = bounds;
+
+  workCtx.save();
+  workCtx.globalAlpha = alpha;
+  workCtx.drawImage(img, dx, dy, dw, dh);
+  workCtx.restore();
+
+  if (drawGuide || isSelectedStamp) {
+    workCtx.save();
+    workCtx.strokeStyle = isSelectedStamp
+      ? 'rgba(2, 132, 199, 0.95)'
+      : 'rgba(79, 70, 229, 0.9)';
+    workCtx.lineWidth = Math.max(2, Math.round(workCanvas.width / 350));
+    workCtx.setLineDash(isSelectedStamp ? [6, 3] : [5, 4]);
+    workCtx.strokeRect(dx, dy, dw, dh);
+
+    if (isSelectedStamp) {
+      // Draw bottom-right resize handle on the selected placed character icon
+      const handleRadius = Math.max(5, Math.round(workCanvas.width / 110));
+      const hx = dx + dw;
+      const hy = dy + dh;
+      workCtx.setLineDash([]);
+      workCtx.fillStyle = '#0284c7';
+      workCtx.strokeStyle = '#ffffff';
+      workCtx.lineWidth = Math.max(1.5, Math.round(workCanvas.width / 400));
+      workCtx.beginPath();
+      workCtx.arc(hx, hy, handleRadius, 0, Math.PI * 2);
+      workCtx.fill();
+      workCtx.stroke();
+    }
+    workCtx.restore();
+  }
+}
+
+// Apply a spot effect (brush / circle / rect / icon) onto workCanvas in image coordinates
+function applySpotRegion(workCtx, workCanvas, region, includeUI = false) {
+  if (region.type === 'icon') {
+    const isSelected = Boolean(
+      includeUI && region.id && region.id === state.selectedStampId
+    );
+    applyIconRegion(workCtx, workCanvas, region, 1, false, isSelected);
+    return;
+  }
+
   if (region.mode === 'brush') {
     applyBrushRegion(workCtx, workCanvas, region);
     return;
@@ -407,12 +562,57 @@ function renderCanvas(includeUI = true) {
 
   // Apply all committed spot regions
   for (const reg of state.regions) {
-    applySpotRegion(workCtx, workCanvas, reg);
+    applySpotRegion(workCtx, workCanvas, reg, includeUI);
   }
 
   // Preview active drag region or active brush stroke if dragging
   if (state.isDragging) {
-    if (state.drawMode === 'brush' && state.currentBrushPoints.length > 0) {
+    if (state.spotTool === 'icon') {
+      if (state.iconDragAction === 'create-new') {
+        const activeIcon = getActiveCharacterIcon();
+        if (activeIcon) {
+          const pt = state.dragCurrent || state.dragStart || state.hoverPos;
+          const w =
+            state.dragStart && state.dragCurrent
+              ? state.dragCurrent.x - state.dragStart.x
+              : 0;
+          const h =
+            state.dragStart && state.dragCurrent
+              ? state.dragCurrent.y - state.dragStart.y
+              : 0;
+          const dragSpan = Math.max(Math.abs(w), Math.abs(h));
+          const isDraggedSize = dragSpan >= 12;
+
+          let draftIconRegion;
+          if (isDraggedSize) {
+            const draggedScaled = Math.max(16, Math.round(dragSpan));
+            draftIconRegion = {
+              mode: 'stamp',
+              type: 'icon',
+              iconId: activeIcon.id,
+              iconDataUrl: activeIcon.dataUrl,
+              cx: state.dragStart.x + w / 2,
+              cy: state.dragStart.y + h / 2,
+              size: draggedScaled,
+              baseSize: getBaseIconSizeFromScaled(draggedScaled)
+            };
+          } else {
+            const presetScaled = getScaledIconSize(activeIcon.size);
+            draftIconRegion = {
+              mode: 'stamp',
+              type: 'icon',
+              iconId: activeIcon.id,
+              iconDataUrl: activeIcon.dataUrl,
+              cx: pt?.x ?? imgW / 2,
+              cy: pt?.y ?? imgH / 2,
+              size: presetScaled,
+              baseSize: activeIcon.size || DEFAULT_CHAR_ICON_SIZE
+            };
+          }
+          applyIconRegion(workCtx, workCanvas, draftIconRegion, 0.92, includeUI, false);
+        }
+      }
+    } else if (state.drawMode === 'brush' && state.currentBrushPoints.length > 0) {
       const draftBrush = {
         mode: 'brush',
         type: state.spotTool,
@@ -464,23 +664,67 @@ function renderCanvas(includeUI = true) {
     }
   }
 
-  // Draw circular brush cursor preview when in 'brush' mode
-  if (includeUI && state.drawMode === 'brush' && state.hoverPos) {
-    const r = getScaledBrushDiameter() / 2;
-    workCtx.save();
-    workCtx.beginPath();
-    workCtx.arc(state.hoverPos.x, state.hoverPos.y, r, 0, Math.PI * 2);
-    workCtx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
-    workCtx.lineWidth = Math.max(2, Math.round(imgW / 300));
-    workCtx.stroke();
+  // Draw hover preview or slider-adjustment preview for character icon / brush cursor
+  if (includeUI && !state.isDragging) {
+    if (state.spotTool === 'icon' && state.hoverPos) {
+      const activeIcon = getActiveCharacterIcon();
+      if (activeIcon) {
+        applyIconRegion(
+          workCtx,
+          workCanvas,
+          {
+            mode: 'stamp',
+            type: 'icon',
+            iconId: activeIcon.id,
+            iconDataUrl: activeIcon.dataUrl,
+            cx: state.hoverPos.x,
+            cy: state.hoverPos.y,
+            size: getScaledIconSize(activeIcon.size),
+            clipCircle: state.drawMode === 'circle'
+          },
+          0.78,
+          true
+        );
+      }
+    } else if (state.previewingIconId) {
+      const previewIcon = state.characterIcons.find(
+        (item) => item.id === state.previewingIconId
+      );
+      if (previewIcon) {
+        applyIconRegion(
+          workCtx,
+          workCanvas,
+          {
+            mode: 'stamp',
+            type: 'icon',
+            iconId: previewIcon.id,
+            iconDataUrl: previewIcon.dataUrl,
+            cx: imgW / 2,
+            cy: imgH / 2,
+            size: getScaledIconSize(previewIcon.size),
+            clipCircle: state.drawMode === 'circle'
+          },
+          0.85,
+          true
+        );
+      }
+    } else if (state.drawMode === 'brush' && state.hoverPos) {
+      const r = getScaledBrushDiameter() / 2;
+      workCtx.save();
+      workCtx.beginPath();
+      workCtx.arc(state.hoverPos.x, state.hoverPos.y, r, 0, Math.PI * 2);
+      workCtx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+      workCtx.lineWidth = Math.max(2, Math.round(imgW / 300));
+      workCtx.stroke();
 
-    workCtx.beginPath();
-    workCtx.arc(state.hoverPos.x, state.hoverPos.y, r, 0, Math.PI * 2);
-    workCtx.strokeStyle = 'rgba(79, 70, 229, 0.95)';
-    workCtx.lineWidth = Math.max(1.5, Math.round(imgW / 450));
-    workCtx.setLineDash([4, 4]);
-    workCtx.stroke();
-    workCtx.restore();
+      workCtx.beginPath();
+      workCtx.arc(state.hoverPos.x, state.hoverPos.y, r, 0, Math.PI * 2);
+      workCtx.strokeStyle = 'rgba(79, 70, 229, 0.95)';
+      workCtx.lineWidth = Math.max(1.5, Math.round(imgW / 450));
+      workCtx.setLineDash([4, 4]);
+      workCtx.stroke();
+      workCtx.restore();
+    }
   }
 
   // Step 2: Compose onto final #editor-canvas with optional frame padding & rounded corners
@@ -537,6 +781,7 @@ async function setCaptureInEditor(capture) {
     state.sourceImage = img;
     state.activeCaptureId = capture.id;
     state.regions = [];
+    state.selectedStampId = null;
 
     els.emptyState.hidden = true;
     els.canvas.hidden = false;
@@ -545,6 +790,7 @@ async function setCaptureInEditor(capture) {
     if (els.btnClearPreview) els.btnClearPreview.disabled = false;
     els.imageDimensions.textContent = `${img.naturalWidth} × ${img.naturalHeight} px`;
 
+    renderPlacedIconList();
     renderCanvas();
     setStatus('編集可能');
   } catch (err) {
@@ -558,6 +804,7 @@ async function clearPreviewInEditor() {
   state.sourceImage = null;
   state.activeCaptureId = null;
   state.regions = [];
+  state.selectedStampId = null;
   state.currentBrushPoints = [];
   state.dragStart = null;
   state.dragCurrent = null;
@@ -574,6 +821,7 @@ async function clearPreviewInEditor() {
   els.btnClearRegions.disabled = true;
   if (els.btnClearPreview) els.btnClearPreview.disabled = true;
 
+  renderPlacedIconList();
   await chrome.storage.local.remove('latestCapture');
   const { captureHistory = [] } = await chrome.storage.local.get('captureHistory');
   renderHistory(captureHistory);
@@ -705,6 +953,502 @@ els.fileUpload.addEventListener('change', async (e) => {
   e.target.value = '';
 });
 
+function updateCanvasHint() {
+  if (state.spotTool === 'icon') {
+    const activeIcon = getActiveCharacterIcon();
+    if (!activeIcon) {
+      els.canvasHint.textContent =
+        'ヒント: 「＋ アイコン追加」からキャラクター画像をアップロードすると、画像上をクリック・ドラッグして隠せます。';
+    } else {
+      els.canvasHint.textContent = `ヒント: クリックで「${activeIcon.name}」(${activeIcon.size}px) を配置、または隠したい場所をドラッグして任意の大きさで配置できます。配置後のアイコンは個別にサイズ変更・移動も可能です。`;
+    }
+    return;
+  }
+
+  if (state.drawMode === 'brush') {
+    els.canvasHint.textContent =
+      'ヒント: 画像上をクリック・ドラッグすると、丸いペンでなぞった部分にぼかしやモザイクを入れられます。';
+  } else if (state.drawMode === 'circle') {
+    els.canvasHint.textContent =
+      'ヒント: 画像上をドラッグして、丸（円・楕円）の範囲にぼかしやモザイクを入れられます。';
+  } else {
+    els.canvasHint.textContent =
+      'ヒント: 画像上をドラッグして、四角形の範囲にぼかしやモザイクを入れられます。';
+  }
+}
+
+function setSpotTool(toolName) {
+  state.spotTool = toolName;
+  const isIconTool = toolName === 'icon';
+
+  for (const c of els.toolChips) {
+    c.classList.toggle('active', c.dataset.tool === toolName);
+  }
+  if (els.charIconPanel) {
+    els.charIconPanel.hidden = !isIconTool;
+    els.charIconPanel.classList.toggle('active-mode', isIconTool);
+  }
+  if (els.drawModeBar) {
+    els.drawModeBar.hidden = isIconTool;
+  }
+  if (els.spotControlsStack) {
+    els.spotControlsStack.hidden = isIconTool;
+  }
+  if (els.brushSizeRow) {
+    els.brushSizeRow.hidden = isIconTool || state.drawMode !== 'brush';
+  }
+  updateCanvasHint();
+  renderCanvas();
+}
+
+async function saveCharacterIconsToStorage() {
+  try {
+    await chrome.storage.local.set({
+      characterIcons: state.characterIcons,
+      selectedCharacterIconId: state.selectedIconId
+    });
+  } catch (err) {
+    console.error('Failed to save character icons:', err);
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('ファイルの読み込みに失敗しました。'));
+    reader.readAsDataURL(file);
+  });
+}
+
+// Normalize uploaded character icon to at most 512x512 PNG so 5 icons fit comfortably in chrome.storage.local
+async function normalizeCharacterIconFile(file) {
+  const rawDataUrl = await readFileAsDataUrl(file);
+  const img = await loadImageElement(rawDataUrl);
+  const maxDim = 512;
+  const w = img.naturalWidth || img.width || 128;
+  const h = img.naturalHeight || img.height || 128;
+
+  if (w <= maxDim && h <= maxDim) {
+    return rawDataUrl;
+  }
+
+  const scale = maxDim / Math.max(w, h);
+  const targetW = Math.max(1, Math.round(w * scale));
+  const targetH = Math.max(1, Math.round(h * scale));
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = targetW;
+  offCanvas.height = targetH;
+  const offCtx = offCanvas.getContext('2d');
+  offCtx.drawImage(img, 0, 0, targetW, targetH);
+  return offCanvas.toDataURL('image/png');
+}
+
+function syncActiveCharacterIconClasses() {
+  if (!els.charIconList) return;
+  const rows = els.charIconList.querySelectorAll('.char-icon-item');
+  for (const row of rows) {
+    const isSelected = row.dataset.iconId === state.selectedIconId;
+    row.classList.toggle('active', isSelected);
+    const pill = row.querySelector('.char-icon-active-pill');
+    if (pill) {
+      pill.hidden = !isSelected;
+    }
+  }
+}
+
+function syncActivePlacedStampClasses() {
+  if (!els.placedIconList) return;
+  const rows = els.placedIconList.querySelectorAll('.placed-icon-item');
+  for (const row of rows) {
+    row.classList.toggle(
+      'active-stamp',
+      row.dataset.stampId === state.selectedStampId
+    );
+  }
+}
+
+function syncPlacedStampSliderUI(stampId, baseSize) {
+  if (!els.placedIconList) return;
+  const row = els.placedIconList.querySelector(
+    `.placed-icon-item[data-stamp-id="${stampId}"]`
+  );
+  if (!row) return;
+  const slider = row.querySelector('input[type="range"]');
+  const output = row.querySelector('output');
+  if (slider) slider.value = String(baseSize);
+  if (output) output.textContent = `${baseSize} px`;
+}
+
+// Render list of character icons already placed on the current canvas so each hidden spot's size can be adjusted independently
+function renderPlacedIconList() {
+  if (!els.placedIconSection || !els.placedIconList || !els.placedIconCount) return;
+
+  const placedStamps = state.regions.filter((r) => r.type === 'icon');
+  els.placedIconCount.textContent = `${placedStamps.length} 箇所`;
+  els.placedIconList.innerHTML = '';
+
+  if (placedStamps.length === 0) {
+    els.placedIconSection.hidden = true;
+    return;
+  }
+
+  els.placedIconSection.hidden = false;
+
+  placedStamps.forEach((stamp, idx) => {
+    if (!stamp.id) {
+      stamp.id = `stamp_${Date.now()}_${idx}`;
+    }
+    const baseSize =
+      stamp.baseSize || getBaseIconSizeFromScaled(stamp.size || DEFAULT_CHAR_ICON_SIZE);
+    stamp.baseSize = baseSize;
+
+    const row = document.createElement('div');
+    row.className = `placed-icon-item${stamp.id === state.selectedStampId ? ' active-stamp' : ''}`;
+    row.dataset.stampId = stamp.id;
+
+    const thumb = document.createElement('img');
+    thumb.className = 'placed-icon-thumb';
+    thumb.src = stamp.iconDataUrl;
+    thumb.alt = `配置 #${idx + 1}`;
+
+    const labelBtn = document.createElement('button');
+    labelBtn.type = 'button';
+    labelBtn.className = 'char-icon-name-btn placed-icon-label';
+    labelBtn.textContent = `配置 #${idx + 1}`;
+    labelBtn.title = 'クリックしてキャンバス上のこのアイコンを選択';
+    labelBtn.addEventListener('click', () => {
+      state.selectedStampId = stamp.id;
+      syncActivePlacedStampClasses();
+      renderCanvas();
+    });
+
+    const sliderId = `placed-size-${stamp.id}`;
+    const slider = document.createElement('input');
+    slider.id = sliderId;
+    slider.className = 'char-icon-size-slider';
+    slider.type = 'range';
+    slider.min = '16';
+    slider.max = '420';
+    slider.step = '2';
+    slider.value = String(baseSize);
+    slider.title = `配置 #${idx + 1} の大きさを個別に調整`;
+
+    const output = document.createElement('output');
+    output.className = 'char-icon-size-val';
+    output.htmlFor = sliderId;
+    output.textContent = `${baseSize} px`;
+
+    slider.addEventListener('input', () => {
+      const newBaseSize = Number(slider.value);
+      stamp.baseSize = newBaseSize;
+      stamp.size = getScaledIconSize(newBaseSize);
+      output.textContent = `${newBaseSize} px`;
+      state.selectedStampId = stamp.id;
+      syncActivePlacedStampClasses();
+      renderCanvas();
+    });
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'btn-icon-slot btn-icon-slot-remove';
+    delBtn.textContent = '×';
+    delBtn.title = `配置 #${idx + 1} を画面から消す`;
+    delBtn.addEventListener('click', () => {
+      state.regions = state.regions.filter((r) => r !== stamp);
+      if (state.selectedStampId === stamp.id) {
+        const remaining = state.regions.filter((r) => r.type === 'icon');
+        state.selectedStampId = remaining[remaining.length - 1]?.id || null;
+      }
+      renderPlacedIconList();
+      renderCanvas();
+    });
+
+    row.appendChild(thumb);
+    row.appendChild(labelBtn);
+    row.appendChild(slider);
+    row.appendChild(output);
+    row.appendChild(delBtn);
+    els.placedIconList.appendChild(row);
+  });
+}
+
+function renderCharacterIconList() {
+  if (!els.charIconList || !els.charIconCount) return;
+
+  const count = state.characterIcons.length;
+  els.charIconCount.textContent = `${count} / ${MAX_CHAR_ICONS} 保存`;
+  els.charIconList.innerHTML = '';
+
+  if (count === 0) {
+    const emptyP = document.createElement('p');
+    emptyP.className = 'char-icon-empty';
+    emptyP.textContent =
+      '「＋ アイコン追加」からキャラクター画像をアップロードしてください（最大5つ）';
+    els.charIconList.appendChild(emptyP);
+    return;
+  }
+
+  state.characterIcons.forEach((icon, index) => {
+    const isSelected = icon.id === state.selectedIconId;
+    const itemEl = document.createElement('div');
+    itemEl.className = `char-icon-item${isSelected ? ' active' : ''}`;
+    itemEl.dataset.iconId = icon.id;
+
+    // Thumbnail button
+    const thumbBtn = document.createElement('button');
+    thumbBtn.type = 'button';
+    thumbBtn.className = 'char-icon-thumb-btn';
+    thumbBtn.title = `「${icon.name}」を選択して隠す`;
+    const thumbImg = document.createElement('img');
+    thumbImg.src = icon.dataUrl;
+    thumbImg.alt = icon.name;
+    thumbBtn.appendChild(thumbImg);
+
+    const selectThisIcon = async () => {
+      state.selectedIconId = icon.id;
+      syncActiveCharacterIconClasses();
+      setSpotTool('icon');
+      await saveCharacterIconsToStorage();
+      setStatus(`アイコン「${icon.name}」を選択中`);
+    };
+
+    thumbBtn.addEventListener('click', selectThisIcon);
+
+    // Middle column: Name + Action buttons + Placement Size Slider
+    const mainCol = document.createElement('div');
+    mainCol.className = 'char-icon-main';
+
+    const topRow = document.createElement('div');
+    topRow.className = 'char-icon-top-row';
+
+    const nameBtn = document.createElement('button');
+    nameBtn.type = 'button';
+    nameBtn.className = 'char-icon-name-btn';
+    nameBtn.title = `クリックして「${icon.name}」を使用`;
+
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = `${index + 1}. ${icon.name}`;
+    nameBtn.appendChild(nameSpan);
+
+    const activePill = document.createElement('span');
+    activePill.className = 'char-icon-active-pill';
+    activePill.textContent = '選択中';
+    activePill.hidden = !isSelected;
+    nameBtn.appendChild(activePill);
+
+    nameBtn.addEventListener('click', selectThisIcon);
+
+    const itemBtns = document.createElement('div');
+    itemBtns.className = 'char-icon-item-btns';
+
+    const replaceBtn = document.createElement('button');
+    replaceBtn.type = 'button';
+    replaceBtn.className = 'btn-icon-slot';
+    replaceBtn.textContent = '変更';
+    replaceBtn.title = 'このスロットのアイコン画像を別のローカル画像に変更';
+    replaceBtn.addEventListener('click', () => {
+      state.replaceTargetIconId = icon.id;
+      els.charIconReplace?.click();
+    });
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'btn-icon-slot btn-icon-slot-remove';
+    removeBtn.textContent = '×';
+    removeBtn.title = '保存リストから登録解除';
+    removeBtn.addEventListener('click', async () => {
+      state.characterIcons = state.characterIcons.filter((c) => c.id !== icon.id);
+      if (state.selectedIconId === icon.id) {
+        state.selectedIconId = state.characterIcons[0]?.id || null;
+      }
+      await saveCharacterIconsToStorage();
+      renderCharacterIconList();
+      updateCanvasHint();
+      renderCanvas();
+      setStatus('アイコンの登録を解除しました');
+    });
+
+    itemBtns.appendChild(replaceBtn);
+    itemBtns.appendChild(removeBtn);
+
+    topRow.appendChild(nameBtn);
+    topRow.appendChild(itemBtns);
+
+    // Placement Size Slider Row for this character icon (sets size for next placement; does NOT overwrite already placed spots)
+    const sizeRow = document.createElement('div');
+    sizeRow.className = 'char-icon-size-row';
+
+    const sliderId = `char-size-${icon.id}`;
+    const sizeLabel = document.createElement('label');
+    sizeLabel.className = 'char-icon-size-label';
+    sizeLabel.htmlFor = sliderId;
+    sizeLabel.textContent = '配置サイズ';
+
+    const sizeSlider = document.createElement('input');
+    sizeSlider.id = sliderId;
+    sizeSlider.className = 'char-icon-size-slider';
+    sizeSlider.type = 'range';
+    sizeSlider.min = '16';
+    sizeSlider.max = '420';
+    sizeSlider.step = '2';
+    sizeSlider.value = String(icon.size || DEFAULT_CHAR_ICON_SIZE);
+
+    const sizeOutput = document.createElement('output');
+    sizeOutput.className = 'char-icon-size-val';
+    sizeOutput.htmlFor = sliderId;
+    sizeOutput.textContent = `${icon.size || DEFAULT_CHAR_ICON_SIZE} px`;
+
+    sizeSlider.addEventListener('input', () => {
+      const newSize = Number(sizeSlider.value);
+      icon.size = newSize;
+      sizeOutput.textContent = `${newSize} px`;
+
+      state.selectedIconId = icon.id;
+      syncActiveCharacterIconClasses();
+      if (state.spotTool !== 'icon') {
+        setSpotTool('icon');
+      } else {
+        updateCanvasHint();
+      }
+
+      // Show a temporary size preview on the canvas for the next placement without altering already-placed stamps
+      state.previewingIconId = icon.id;
+      if (iconSizePreviewTimer) clearTimeout(iconSizePreviewTimer);
+      iconSizePreviewTimer = setTimeout(() => {
+        state.previewingIconId = null;
+        renderCanvas();
+      }, 900);
+
+      renderCanvas();
+    });
+
+    sizeSlider.addEventListener('change', async () => {
+      await saveCharacterIconsToStorage();
+    });
+
+    sizeRow.appendChild(sizeLabel);
+    sizeRow.appendChild(sizeSlider);
+    sizeRow.appendChild(sizeOutput);
+
+    mainCol.appendChild(topRow);
+    mainCol.appendChild(sizeRow);
+
+    itemEl.appendChild(thumbBtn);
+    itemEl.appendChild(mainCol);
+    els.charIconList.appendChild(itemEl);
+  });
+}
+
+// Hit-test placed character icons on the canvas (for individual on-canvas resize handle or move)
+function hitTestPlacedIconRegion(pt) {
+  if (!state.sourceImage) return null;
+  const dummyCanvas = {
+    width: state.sourceImage.naturalWidth,
+    height: state.sourceImage.naturalHeight
+  };
+  const handleHitRadius = Math.max(12, Math.round(dummyCanvas.width / 45));
+
+  for (let i = state.regions.length - 1; i >= 0; i--) {
+    const reg = state.regions[i];
+    if (reg.type !== 'icon') continue;
+    const bounds = getIconRegionBounds(dummyCanvas, reg);
+    if (!bounds) continue;
+
+    const hx = bounds.dx + bounds.dw;
+    const hy = bounds.dy + bounds.dh;
+    if (Math.hypot(pt.x - hx, pt.y - hy) <= handleHitRadius) {
+      return { action: 'resize-existing', region: reg, bounds };
+    }
+
+    if (
+      pt.x >= bounds.dx &&
+      pt.x <= bounds.dx + bounds.dw &&
+      pt.y >= bounds.dy &&
+      pt.y <= bounds.dy + bounds.dh
+    ) {
+      return { action: 'move-existing', region: reg, bounds };
+    }
+  }
+  return null;
+}
+
+// Event Listeners: Character Icon Upload & Slot Replace
+els.charIconUpload?.addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  if (!files.length) return;
+
+  try {
+    setStatus('アイコン画像を読み込み中...');
+    let lastAddedId = state.selectedIconId;
+
+    for (const file of files) {
+      const dataUrl = await normalizeCharacterIconFile(file);
+      const cleanName = file.name.replace(/\.[^/.]+$/, '') || 'キャラアイコン';
+
+      if (state.characterIcons.length < MAX_CHAR_ICONS) {
+        const newIcon = {
+          id: `cicon_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          name: cleanName,
+          dataUrl,
+          size: DEFAULT_CHAR_ICON_SIZE
+        };
+        await cacheCharacterIconImage(newIcon);
+        state.characterIcons.push(newIcon);
+        lastAddedId = newIcon.id;
+      } else {
+        // When all 5 slots are full, update the currently selected slot (or the last slot)
+        const targetIdx = Math.max(
+          0,
+          state.characterIcons.findIndex((c) => c.id === state.selectedIconId)
+        );
+        const existing = state.characterIcons[targetIdx];
+        existing.name = cleanName;
+        existing.dataUrl = dataUrl;
+        await cacheCharacterIconImage(existing);
+        lastAddedId = existing.id;
+      }
+    }
+
+    state.selectedIconId = lastAddedId;
+    await saveCharacterIconsToStorage();
+    renderCharacterIconList();
+    setSpotTool('icon');
+    setStatus(`キャラクターアイコンを保存しました (${state.characterIcons.length}/${MAX_CHAR_ICONS})`);
+  } catch (err) {
+    console.error('Character icon upload error:', err);
+    setStatus('アイコンの読み込みに失敗しました', true);
+  }
+});
+
+els.charIconReplace?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  const targetId = state.replaceTargetIconId;
+  state.replaceTargetIconId = null;
+  if (!file || !targetId) return;
+
+  try {
+    const targetIcon = state.characterIcons.find((c) => c.id === targetId);
+    if (!targetIcon) return;
+
+    const dataUrl = await normalizeCharacterIconFile(file);
+    targetIcon.name = file.name.replace(/\.[^/.]+$/, '') || 'キャラアイコン';
+    targetIcon.dataUrl = dataUrl;
+    await cacheCharacterIconImage(targetIcon);
+
+    state.selectedIconId = targetIcon.id;
+    await saveCharacterIconsToStorage();
+    renderCharacterIconList();
+    setSpotTool('icon');
+    setStatus(`「${targetIcon.name}」のアイコン画像を更新しました`);
+  } catch (err) {
+    console.error('Character icon replace error:', err);
+    setStatus('アイコンの変更に失敗しました', true);
+  }
+});
+
 // Event Listeners: Draw Mode Chips ('brush' | 'circle' | 'rect')
 for (const modeBtn of els.modeChips) {
   modeBtn.addEventListener('click', () => {
@@ -712,19 +1456,8 @@ for (const modeBtn of els.modeChips) {
     modeBtn.classList.add('active');
     state.drawMode = modeBtn.dataset.mode;
 
-    if (state.drawMode === 'brush') {
-      els.brushSizeRow.hidden = false;
-      els.canvasHint.textContent =
-        'ヒント: 画像上をクリック・ドラッグすると、丸いペンでなぞった部分にぼかしやモザイクを入れられます。';
-    } else if (state.drawMode === 'circle') {
-      els.brushSizeRow.hidden = true;
-      els.canvasHint.textContent =
-        'ヒント: 画像上をドラッグして、丸（円・楕円）の範囲にぼかしやモザイクを入れられます。';
-    } else {
-      els.brushSizeRow.hidden = true;
-      els.canvasHint.textContent =
-        'ヒント: 画像上をドラッグして、四角形の範囲にぼかしやモザイクを入れられます。';
-    }
+    els.brushSizeRow.hidden = state.drawMode !== 'brush';
+    updateCanvasHint();
     renderCanvas();
   });
 }
@@ -740,9 +1473,7 @@ els.brushSize.addEventListener('input', () => {
 // Event Listeners: Spot Tool Chips & Canvas Dragging
 for (const chip of els.toolChips) {
   chip.addEventListener('click', () => {
-    for (const c of els.toolChips) c.classList.remove('active');
-    chip.classList.add('active');
-    state.spotTool = chip.dataset.tool;
+    setSpotTool(chip.dataset.tool);
   });
 }
 
@@ -757,13 +1488,45 @@ els.spotColor.addEventListener('input', () => {
 
 els.canvas.addEventListener('mousedown', (e) => {
   if (!state.sourceImage || e.button !== 0) return;
-  const pt = getImageCoordsFromEvent(e);
-  state.isDragging = true;
-  state.hoverPos = pt;
 
-  if (state.drawMode === 'brush') {
+  const pt = getImageCoordsFromEvent(e);
+  state.hoverPos = pt;
+  state.previewingIconId = null;
+
+  if (state.spotTool === 'icon') {
+    // Check if user clicked on an already-placed character icon's resize handle or body
+    const hit = hitTestPlacedIconRegion(pt);
+    if (hit) {
+      state.isDragging = true;
+      state.iconDragAction = hit.action;
+      state.activeManipulatedRegion = hit.region;
+      state.selectedStampId = hit.region.id;
+      state.dragStart = pt;
+      state.dragCurrent = pt;
+      state.dragOffset = {
+        x: pt.x - hit.bounds.cx,
+        y: pt.y - hit.bounds.cy
+      };
+      syncActivePlacedStampClasses();
+      renderCanvas();
+      return;
+    }
+
+    if (!getActiveCharacterIcon()) {
+      setStatus('先に「＋ アイコン追加」からキャラクター画像をアップロードしてください', true);
+      return;
+    }
+
+    state.isDragging = true;
+    state.iconDragAction = 'create-new';
+    state.activeManipulatedRegion = null;
+    state.dragStart = pt;
+    state.dragCurrent = pt;
+  } else if (state.drawMode === 'brush') {
+    state.isDragging = true;
     state.currentBrushPoints = [pt];
   } else {
+    state.isDragging = true;
     state.dragStart = pt;
     state.dragCurrent = pt;
   }
@@ -773,7 +1536,7 @@ els.canvas.addEventListener('mousedown', (e) => {
 els.canvas.addEventListener('mousemove', (e) => {
   if (!state.sourceImage) return;
   state.hoverPos = getImageCoordsFromEvent(e);
-  if (!state.isDragging && state.drawMode === 'brush') {
+  if (!state.isDragging && (state.drawMode === 'brush' || state.spotTool === 'icon')) {
     renderCanvas();
   }
 });
@@ -790,7 +1553,29 @@ window.addEventListener('mousemove', (e) => {
   const pt = getImageCoordsFromEvent(e);
   state.hoverPos = pt;
 
-  if (state.drawMode === 'brush') {
+  if (state.spotTool === 'icon') {
+    state.dragCurrent = pt;
+    const targetReg = state.activeManipulatedRegion;
+    if (state.iconDragAction === 'move-existing' && targetReg) {
+      const newCx = pt.x - state.dragOffset.x;
+      const newCy = pt.y - state.dragOffset.y;
+      targetReg.cx = newCx;
+      targetReg.cy = newCy;
+      if (targetReg.customBox && targetReg.w !== undefined && targetReg.h !== undefined) {
+        targetReg.x = newCx - Math.abs(targetReg.w) / 2;
+        targetReg.y = newCy - Math.abs(targetReg.h) / 2;
+      }
+    } else if (state.iconDragAction === 'resize-existing' && targetReg) {
+      const cx = targetReg.cx ?? state.dragStart.x;
+      const cy = targetReg.cy ?? state.dragStart.y;
+      const dist = Math.max(Math.abs(pt.x - cx), Math.abs(pt.y - cy)) * 2;
+      const newScaledSize = Math.max(16, Math.round(dist));
+      const newBaseSize = getBaseIconSizeFromScaled(newScaledSize);
+      targetReg.size = newScaledSize;
+      targetReg.baseSize = newBaseSize;
+      syncPlacedStampSliderUI(targetReg.id, newBaseSize);
+    }
+  } else if (state.drawMode === 'brush') {
     const last = state.currentBrushPoints[state.currentBrushPoints.length - 1];
     if (!last || Math.hypot(pt.x - last.x, pt.y - last.y) >= 2) {
       state.currentBrushPoints.push(pt);
@@ -805,7 +1590,60 @@ window.addEventListener('mouseup', () => {
   if (!state.isDragging) return;
   state.isDragging = false;
 
-  if (state.drawMode === 'brush') {
+  if (state.spotTool === 'icon') {
+    if (state.iconDragAction === 'create-new') {
+      const activeIcon = getActiveCharacterIcon();
+      const pt = state.dragCurrent || state.dragStart;
+      if (activeIcon && pt) {
+        const w =
+          state.dragStart && state.dragCurrent
+            ? state.dragCurrent.x - state.dragStart.x
+            : 0;
+        const h =
+          state.dragStart && state.dragCurrent
+            ? state.dragCurrent.y - state.dragStart.y
+            : 0;
+        const dragSpan = Math.max(Math.abs(w), Math.abs(h));
+        const isDraggedSize = dragSpan >= 12;
+        const stampId = `stamp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+        if (isDraggedSize) {
+          const draggedScaled = Math.max(16, Math.round(dragSpan));
+          const draggedBase = getBaseIconSizeFromScaled(draggedScaled);
+          state.regions.push({
+            id: stampId,
+            mode: 'stamp',
+            type: 'icon',
+            iconId: activeIcon.id,
+            iconDataUrl: activeIcon.dataUrl,
+            cx: state.dragStart.x + w / 2,
+            cy: state.dragStart.y + h / 2,
+            size: draggedScaled,
+            baseSize: draggedBase
+          });
+        } else {
+          const baseSize = activeIcon.size || DEFAULT_CHAR_ICON_SIZE;
+          state.regions.push({
+            id: stampId,
+            mode: 'stamp',
+            type: 'icon',
+            iconId: activeIcon.id,
+            iconDataUrl: activeIcon.dataUrl,
+            cx: pt.x,
+            cy: pt.y,
+            size: getScaledIconSize(baseSize),
+            baseSize
+          });
+        }
+        state.selectedStampId = stampId;
+        renderPlacedIconList();
+      }
+    } else {
+      renderPlacedIconList();
+    }
+    state.iconDragAction = null;
+    state.activeManipulatedRegion = null;
+  } else if (state.drawMode === 'brush') {
     if (state.currentBrushPoints.length > 0) {
       state.regions.push({
         mode: 'brush',
@@ -841,13 +1679,20 @@ window.addEventListener('mouseup', () => {
 
 els.btnUndoRegion.addEventListener('click', () => {
   if (state.regions.length > 0) {
-    state.regions.pop();
+    const removed = state.regions.pop();
+    if (removed && removed.id === state.selectedStampId) {
+      const remaining = state.regions.filter((r) => r.type === 'icon');
+      state.selectedStampId = remaining[remaining.length - 1]?.id || null;
+    }
+    renderPlacedIconList();
     renderCanvas();
   }
 });
 
 els.btnClearRegions.addEventListener('click', () => {
   state.regions = [];
+  state.selectedStampId = null;
+  renderPlacedIconList();
   renderCanvas();
 });
 
@@ -1518,12 +2363,36 @@ window.addEventListener('pagehide', () => {
 (async function init() {
   syncFilterUIFromState();
   updateBrushPreviewDot();
+  setSpotTool(state.spotTool);
   checkAndPreparePromptApi();
   try {
-    const { latestCapture, captureHistory = [] } = await chrome.storage.local.get([
+    const {
+      latestCapture,
+      captureHistory = [],
+      characterIcons = [],
+      selectedCharacterIconId = null
+    } = await chrome.storage.local.get([
       'latestCapture',
-      'captureHistory'
+      'captureHistory',
+      'characterIcons',
+      'selectedCharacterIconId'
     ]);
+
+    if (Array.isArray(characterIcons) && characterIcons.length > 0) {
+      state.characterIcons = characterIcons.slice(0, MAX_CHAR_ICONS).map((item) => ({
+        id: item.id || `cicon_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name: item.name || 'キャラアイコン',
+        dataUrl: item.dataUrl,
+        size: Math.max(16, Math.min(320, Number(item.size) || DEFAULT_CHAR_ICON_SIZE))
+      }));
+      await Promise.all(state.characterIcons.map((icon) => cacheCharacterIconImage(icon)));
+      state.selectedIconId =
+        state.characterIcons.find((c) => c.id === selectedCharacterIconId)?.id ||
+        state.characterIcons[0]?.id ||
+        null;
+    }
+    renderCharacterIconList();
+
     if (latestCapture) {
       await setCaptureInEditor(latestCapture);
     }

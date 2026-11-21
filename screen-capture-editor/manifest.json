@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Screen Capture & Blur Studio",
-  "version": "1.0.1",
-  "description": "画面の表示領域や指定範囲をキャプチャし、サイドパネルで全体ぼかし・部分ぼかし・モザイク・各種フィルターを編集できる拡張機能です。",
+  "version": "1.1.0",
+  "description": "画面の表示領域や指定範囲をキャプチャし、サイドパネルで全体ぼかし・部分ぼかし・モザイク・キャラアイコン隠し・各種フィルターを編集できる拡張機能です。",
   "permissions": [
     "activeTab",
     "sidePanel",
