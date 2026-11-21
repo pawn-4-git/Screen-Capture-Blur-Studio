@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Screen Capture &amp; Blur Studio</title>
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
+
 <body>
   <header class="app-header">
     <div class="brand">
@@ -94,14 +96,24 @@
           <button id="btn-clear-regions" type="button" class="btn btn-xs" disabled title="すべての部分加工をクリア">
             部分加工クリア
           </button>
-          <button id="btn-clear-preview" type="button" class="btn btn-xs btn-danger-xs" disabled title="現在表示中のプレビュー画像をクリア">
+          <button id="btn-clear-preview" type="button" class="btn btn-xs btn-danger-xs" disabled
+            title="現在表示中のプレビュー画像をクリア">
             プレビュークリア
           </button>
         </div>
       </div>
 
+      <!-- 部分加工ツール切り替え -->
+      <div class="tool-selector" role="radiogroup" aria-label="加工エフェクト種類">
+        <button type="button" class="tool-chip active" data-tool="blur">部分ぼかし</button>
+        <button type="button" class="tool-chip" data-tool="pixelate">モザイク</button>
+        <button type="button" class="tool-chip" data-tool="mask">塗りつぶし</button>
+        <button type="button" class="tool-chip" data-tool="box">注目枠・マーカー</button>
+        <button type="button" class="tool-chip" data-tool="icon">キャラアイコン</button>
+      </div>
+
       <!-- 描画形状モード切り替え（丸ペン / 四角形選択 / 円形選択） -->
-      <div class="draw-mode-bar" role="radiogroup" aria-label="描画形状モード">
+      <div id="draw-mode-bar" class="draw-mode-bar" role="radiogroup" aria-label="描画形状モード">
         <span class="mode-bar-label">編集形状:</span>
         <div class="mode-buttons">
           <button type="button" class="mode-chip active" data-mode="brush" title="ペンのように丸いブラシでなぞって加工">
@@ -116,16 +128,38 @@
         </div>
       </div>
 
-      <!-- 部分加工ツール切り替え -->
-      <div class="tool-selector" role="radiogroup" aria-label="加工エフェクト種類">
-        <button type="button" class="tool-chip active" data-tool="blur">部分ぼかし</button>
-        <button type="button" class="tool-chip" data-tool="pixelate">モザイク</button>
-        <button type="button" class="tool-chip" data-tool="mask">塗りつぶし</button>
-        <button type="button" class="tool-chip" data-tool="box">注目枠・マーカー</button>
+      <!-- キャラクターアイコンで隠す（ローカルから最大5件保存・個別サイズ調整） -->
+      <div id="char-icon-panel" class="char-icon-panel" aria-label="キャラクターアイコン設定" hidden>
+        <div class="char-icon-header">
+          <div class="char-icon-title-wrap">
+            <span class="char-icon-title">キャラクターアイコンで隠す</span>
+            <span id="char-icon-count" class="char-icon-badge">0 / 5 保存</span>
+          </div>
+          <div class="char-icon-actions">
+            <label id="btn-upload-char-icon" for="char-icon-upload" class="btn btn-xs btn-char-upload">
+              ＋ アイコン追加
+            </label>
+            <input id="char-icon-upload" type="file" accept="image/*" multiple hidden />
+            <input id="char-icon-replace" type="file" accept="image/*" hidden />
+          </div>
+        </div>
+        <p class="char-icon-desc">
+          最大5つ保存可能。隠す場所ごとに大きさを変えて配置・個別サイズ調整できます（画像上でのドラッグサイズ指定や配置後の個別変更にも対応）。
+        </p>
+        <div id="char-icon-list" class="char-icon-list">
+          <p class="char-icon-empty">「＋ アイコン追加」からキャラクター画像をアップロードしてください（最大5つ）</p>
+        </div>
+        <div id="placed-icon-section" class="placed-icon-section" hidden>
+          <div class="placed-icon-header">
+            <span class="placed-icon-title">画面に配置したアイコン（場所ごとにサイズ調整）</span>
+            <span id="placed-icon-count" class="placed-icon-badge">0 箇所</span>
+          </div>
+          <div id="placed-icon-list" class="placed-icon-list"></div>
+        </div>
       </div>
 
       <!-- 丸の大きさ（ブラシサイズ）＆ぼかし強度 -->
-      <div class="spot-controls-stack">
+      <div id="spot-controls-stack" class="spot-controls-stack">
         <div id="brush-size-row" class="spot-settings-row">
           <label class="spot-slider-label" for="brush-size">
             <span>丸の大きさ (ペン太さ)</span>
@@ -277,7 +311,8 @@
     <section class="card history-card" aria-label="最近のキャプチャ履歴">
       <div class="section-header">
         <h2 class="section-title">最近のキャプチャ履歴 (最大5件)</h2>
-        <button id="btn-clear-history" type="button" class="btn btn-xs btn-danger-xs" disabled title="過去のキャプチャ履歴をすべてクリア">
+        <button id="btn-clear-history" type="button" class="btn btn-xs btn-danger-xs" disabled
+          title="過去のキャプチャ履歴をすべてクリア">
           履歴をクリア
         </button>
       </div>
@@ -289,5 +324,5 @@
 
   <script src="sidepanel.js"></script>
 </body>
-</html>
 
+</html>
