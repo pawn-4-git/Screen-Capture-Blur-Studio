@@ -69,6 +69,23 @@
         </button>
       </div>
 
+      <!-- AI画像ぼかし強度コントロール（適用前・適用後どちらでも全体一括調整可能） -->
+      <div id="ai-blur-control" class="ai-blur-control">
+        <div class="ai-blur-row">
+          <label class="spot-slider-label" for="ai-blur-strength">
+            <span>AI画像ぼかし強度</span>
+            <output id="ai-blur-strength-val" for="ai-blur-strength">16 px</output>
+          </label>
+          <input id="ai-blur-strength" type="range" min="0" max="40" step="1" value="16" />
+        </div>
+        <div class="ai-blur-presets" role="group" aria-label="AI画像ぼかし強度プリセット">
+          <button type="button" class="preset-btn ai-blur-preset-btn" data-ai-blur="0">OFF</button>
+          <button type="button" class="preset-btn ai-blur-preset-btn" data-ai-blur="6">弱 (6px)</button>
+          <button type="button" class="preset-btn ai-blur-preset-btn active" data-ai-blur="16">中 (16px)</button>
+          <button type="button" class="preset-btn ai-blur-preset-btn" data-ai-blur="28">強 (28px)</button>
+        </div>
+      </div>
+
       <!-- プログレスバー表示エリア -->
       <div id="ai-progress-wrap" class="ai-progress-wrap" hidden>
         <div class="ai-progress-header">
