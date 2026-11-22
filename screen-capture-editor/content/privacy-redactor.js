@@ -335,6 +335,7 @@
     }
 
     if (localImgEls.length > 0) {
+      const safeBlurPx = Math.max(0, Math.min(60, Number(blurPx) || 0));
       await waitFrameSafe();
       for (const el of localImgEls) {
         if (!originalImageStyles.has(el)) {
@@ -344,14 +345,50 @@
             transition: el.style.transition
           });
         }
+        const saved = originalImageStyles.get(el);
         el.style.transition = 'filter 0.2s ease';
-        el.style.filter = `blur(${blurPx}px)`;
-        el.style.webkitFilter = `blur(${blurPx}px)`;
+        if (safeBlurPx <= 0) {
+          el.style.filter = saved.filter || 'none';
+          el.style.webkitFilter = saved.webkitFilter || 'none';
+        } else {
+          el.style.filter = `blur(${safeBlurPx}px)`;
+          el.style.webkitFilter = `blur(${safeBlurPx}px)`;
+        }
         blurredImageCount++;
       }
     }
 
     return { redactedTextCount, blurredImageCount };
+  }
+
+  // Update CSS blur strength for all currently AI-blurred image elements at once
+  async function updateImageBlurStrength(blurPx = 16) {
+    const safeBlurPx = Math.max(0, Math.min(60, Number(blurPx) || 0));
+    const entries = Array.from(originalImageStyles.entries());
+    if (entries.length === 0) {
+      return { updatedCount: 0, blurPx: safeBlurPx };
+    }
+
+    let updatedCount = 0;
+    const BATCH = 20;
+    for (let i = 0; i < entries.length; i += BATCH) {
+      const slice = entries.slice(i, i + BATCH);
+      await waitFrameSafe();
+      for (const [el, saved] of slice) {
+        if (!el || !el.isConnected) continue;
+        el.style.transition = 'none';
+        if (safeBlurPx <= 0) {
+          el.style.filter = saved.filter || 'none';
+          el.style.webkitFilter = saved.webkitFilter || 'none';
+        } else {
+          el.style.filter = `blur(${safeBlurPx}px)`;
+          el.style.webkitFilter = `blur(${safeBlurPx}px)`;
+        }
+        updatedCount++;
+      }
+    }
+
+    return { updatedCount, blurPx: safeBlurPx };
   }
 
   // Restore modified HTML text nodes and CSS blurred image elements
@@ -391,6 +428,7 @@
   globalThis.__scbsPrivacyRedactor = {
     collectHtmlElements,
     applyElementChanges,
+    updateImageBlurStrength,
     restoreAllChanges
   };
 })();

@@ -12,6 +12,7 @@ const state = {
   brushSize: 36, // Diameter in image pixels (scaled comfortably)
   spotTool: 'blur', // 'blur' | 'pixelate' | 'mask' | 'box' | 'icon'
   spotStrength: 16,
+  aiBlurStrength: 16, // Blur intensity (px) for Gemini Nano AI image blurring
   spotColor: '#0f172a',
   characterIcons: [], // Up to 5 saved icons: [{ id, name, dataUrl, size }]
   selectedIconId: null,
@@ -101,6 +102,9 @@ const els = {
   aiModelBadge: document.getElementById('ai-model-badge'),
   btnAiProtect: document.getElementById('btn-ai-protect'),
   btnAiRestore: document.getElementById('btn-ai-restore'),
+  aiBlurStrength: document.getElementById('ai-blur-strength'),
+  aiBlurStrengthVal: document.getElementById('ai-blur-strength-val'),
+  aiBlurPresetBtns: document.querySelectorAll('.ai-blur-preset-btn'),
   aiProgressWrap: document.getElementById('ai-progress-wrap'),
   aiProgressBar: document.getElementById('ai-progress-bar'),
   aiProgressLabel: document.getElementById('ai-progress-label'),
@@ -1836,6 +1840,132 @@ chrome.runtime.onMessage.addListener((message) => {
 
 let baseTextSession = null;
 let lastProtectedTabId = null;
+let lastAiBlurredCount = 0;
+let lastAiCaptureId = null;
+let aiBlurApplyInFlight = false;
+let pendingAiBlurRequest = null;
+
+function syncAiBlurUI() {
+  const val = Math.max(0, Math.min(40, Number(state.aiBlurStrength) || 0));
+  state.aiBlurStrength = val;
+  if (els.aiBlurStrength) {
+    els.aiBlurStrength.value = String(val);
+  }
+  if (els.aiBlurStrengthVal) {
+    els.aiBlurStrengthVal.textContent = val > 0 ? `${val} px` : 'OFF';
+  }
+  if (els.aiBlurPresetBtns) {
+    for (const btn of els.aiBlurPresetBtns) {
+      btn.classList.toggle('active', Number(btn.dataset.aiBlur) === val);
+    }
+  }
+}
+
+async function saveAiBlurStrengthToStorage() {
+  try {
+    await chrome.storage.local.set({ aiBlurStrength: state.aiBlurStrength });
+  } catch (err) {
+    console.warn('Failed to save AI blur strength:', err);
+  }
+}
+
+async function refreshAiCapturePreview(targetTab) {
+  if (!targetTab || !targetTab.active) return;
+  try {
+    await new Promise((r) => setTimeout(r, 60));
+    const dataUrl = await chrome.tabs.captureVisibleTab(targetTab.windowId, {
+      format: 'png'
+    });
+    const img = await loadImageElement(dataUrl);
+
+    if (state.activeCaptureId && state.activeCaptureId === lastAiCaptureId) {
+      state.sourceImage = img;
+      els.imageDimensions.textContent = `${img.naturalWidth} × ${img.naturalHeight} px`;
+      renderCanvas();
+
+      const { latestCapture, captureHistory = [] } = await chrome.storage.local.get([
+        'latestCapture',
+        'captureHistory'
+      ]);
+      const updatedHistory = captureHistory.map((item) =>
+        item.id === lastAiCaptureId ? { ...item, dataUrl } : item
+      );
+      const updatedLatest =
+        latestCapture && latestCapture.id === lastAiCaptureId
+          ? { ...latestCapture, dataUrl }
+          : latestCapture;
+      await chrome.storage.local.set({
+        ...(updatedLatest ? { latestCapture: updatedLatest } : {}),
+        captureHistory: updatedHistory
+      });
+      renderHistory(updatedHistory);
+    } else if (!state.sourceImage) {
+      const { record, updatedHistory } = await saveCaptureRecordDirect(dataUrl, {
+        title: `${targetTab.title || 'ページ'} (AI保護済)`,
+        url: targetTab.url || ''
+      });
+      lastAiCaptureId = record.id;
+      await setCaptureInEditor(record);
+      renderHistory(updatedHistory);
+    }
+  } catch (err) {
+    console.warn('Failed to refresh AI capture preview:', err);
+  }
+}
+
+// Apply updated AI blur strength to all AI-blurred images on the protected page
+async function applyAiBlurStrengthToPage(blurPx, { recapturePreview = false } = {}) {
+  if (!lastProtectedTabId || lastAiBlurredCount === 0) return;
+
+  if (aiBlurApplyInFlight) {
+    pendingAiBlurRequest = {
+      blurPx,
+      recapturePreview: Boolean(pendingAiBlurRequest?.recapturePreview || recapturePreview)
+    };
+    return;
+  }
+
+  aiBlurApplyInFlight = true;
+  try {
+    const targetTab = await resolveTargetTab(lastProtectedTabId);
+    if (!targetTab || !targetTab.id) return;
+
+    const [updateExec] = await chrome.scripting.executeScript({
+      target: { tabId: targetTab.id },
+      func: async (px) => {
+        if (!globalThis.__scbsPrivacyRedactor?.updateImageBlurStrength) {
+          return { updatedCount: 0, blurPx: px };
+        }
+        return await globalThis.__scbsPrivacyRedactor.updateImageBlurStrength(px);
+      },
+      args: [blurPx]
+    });
+
+    const result = updateExec?.result || { updatedCount: 0, blurPx };
+    if (result.updatedCount > 0) {
+      lastAiBlurredCount = result.updatedCount;
+      if (recapturePreview) {
+        await refreshAiCapturePreview(targetTab);
+      }
+      setStatus(
+        blurPx > 0
+          ? `AI画像ぼかし強度: ${blurPx} px (${result.updatedCount}件)`
+          : `AI画像ぼかし: OFF (${result.updatedCount}件)`
+      );
+    }
+  } catch (err) {
+    console.warn('Failed to update AI image blur strength:', err);
+  } finally {
+    aiBlurApplyInFlight = false;
+    if (pendingAiBlurRequest) {
+      const next = pendingAiBlurRequest;
+      pendingAiBlurRequest = null;
+      applyAiBlurStrengthToPage(next.blurPx, {
+        recapturePreview: next.recapturePreview
+      });
+    }
+  }
+}
 
 function setAiProgress(pct, labelText) {
   const clamped = Math.max(0, Math.min(100, Math.round(pct)));
@@ -2146,6 +2276,29 @@ els.btnAiProtect.addEventListener('mouseenter', () => {
   checkAndPreparePromptApi();
 });
 
+// Event Listeners: AI Image Blur Strength Slider & Presets (works before & after AI protection)
+els.aiBlurStrength?.addEventListener('input', () => {
+  state.aiBlurStrength = Number(els.aiBlurStrength.value);
+  syncAiBlurUI();
+  applyAiBlurStrengthToPage(state.aiBlurStrength, { recapturePreview: false });
+});
+
+els.aiBlurStrength?.addEventListener('change', async () => {
+  state.aiBlurStrength = Number(els.aiBlurStrength.value);
+  syncAiBlurUI();
+  await saveAiBlurStrengthToStorage();
+  await applyAiBlurStrengthToPage(state.aiBlurStrength, { recapturePreview: true });
+});
+
+for (const btn of els.aiBlurPresetBtns || []) {
+  btn.addEventListener('click', async () => {
+    state.aiBlurStrength = Number(btn.dataset.aiBlur);
+    syncAiBlurUI();
+    await saveAiBlurStrengthToStorage();
+    await applyAiBlurStrengthToPage(state.aiBlurStrength, { recapturePreview: true });
+  });
+}
+
 // Main AI Protection Button Handler — Per-HTML-Element Judgment & DOM/CSS Update
 els.btnAiProtect.addEventListener('click', async () => {
   els.btnAiProtect.disabled = true;
@@ -2255,7 +2408,7 @@ els.btnAiProtect.addEventListener('click', async () => {
         {
           textDecisions,
           blurImageIds,
-          blurPx: Math.max(10, state.spotStrength)
+          blurPx: state.aiBlurStrength
         }
       ]
     });
@@ -2263,6 +2416,7 @@ els.btnAiProtect.addEventListener('click', async () => {
     const stats = applyExec?.result || { redactedTextCount: 0, blurredImageCount: 0 };
     const redactedTextCount = stats.redactedTextCount || 0;
     const blurredImageCount = stats.blurredImageCount || 0;
+    lastAiBlurredCount = blurredImageCount;
 
     // Wait briefly for CSS blur & text repaint, then capture visible tab directly
     await new Promise((r) => setTimeout(r, 80));
@@ -2274,6 +2428,7 @@ els.btnAiProtect.addEventListener('click', async () => {
       url: applyTab.url || ''
     });
 
+    lastAiCaptureId = record.id;
     await setCaptureInEditor(record);
     renderHistory(updatedHistory);
     els.btnAiRestore.disabled = false;
@@ -2284,7 +2439,9 @@ els.btnAiProtect.addEventListener('click', async () => {
     els.aiResultBox.hidden = false;
     els.aiResultSummary.textContent = `完了 (検査 ${totalElements} 要素): HTML文字の伏せ字変更 ${redactedTextCount} 箇所 / 画像のCSSぼかし設定 ${blurredImageCount} 件`;
     els.aiResultDetail.textContent =
-      'ページ上の各HTML要素を個別に判定し、HTMLテキストの伏せ字化と画像要素への filter: blur() CSS設定を反映しました。';
+    blurredImageCount > 0
+      ? 'ページ上の各HTML要素を個別に判定し反映しました。上の「AI画像ぼかし強度」から、ぼかした全画像の強さを後から一括変更できます。'
+      : 'ページ上の各HTML要素を個別に判定し、HTMLテキストの伏せ字化と画像要素への filter: blur() CSS設定を反映しました。';
 
     setStatus('AI保護完了');
   } catch (err) {
@@ -2340,6 +2497,8 @@ els.btnAiRestore.addEventListener('click', async () => {
       await setCaptureInEditor(record);
       renderHistory(updatedHistory);
     }
+    lastAiBlurredCount = 0;
+    lastAiCaptureId = null;
     els.aiProgressWrap.hidden = true;
     els.aiResultBox.hidden = false;
     els.aiResultSummary.textContent = 'HTMLの文字変更と画像のぼかしCSSを元に戻しました。';
@@ -2362,6 +2521,7 @@ window.addEventListener('pagehide', () => {
 // Initialize Side Panel on load
 (async function init() {
   syncFilterUIFromState();
+  syncAiBlurUI();
   updateBrushPreviewDot();
   setSpotTool(state.spotTool);
   checkAndPreparePromptApi();
@@ -2370,13 +2530,18 @@ window.addEventListener('pagehide', () => {
       latestCapture,
       captureHistory = [],
       characterIcons = [],
-      selectedCharacterIconId = null
+      selectedCharacterIconId = null,
+      aiBlurStrength = 16
     } = await chrome.storage.local.get([
       'latestCapture',
       'captureHistory',
       'characterIcons',
-      'selectedCharacterIconId'
+      'selectedCharacterIconId',
+      'aiBlurStrength'
     ]);
+
+    state.aiBlurStrength = Math.max(0, Math.min(40, Number(aiBlurStrength) || 0));
+    syncAiBlurUI();
 
     if (Array.isArray(characterIcons) && characterIcons.length > 0) {
       state.characterIcons = characterIcons.slice(0, MAX_CHAR_ICONS).map((item) => ({
